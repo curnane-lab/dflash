@@ -441,6 +441,43 @@ class SwanLabArguments:
 
 
 @dataclass
+class DFlashArguments:
+    r"""Arguments pertaining to the DFlash speculative decoding training."""
+
+    dflash_block_size: int = field(
+        default=16,
+        metadata={"help": "Block size for DFlash parallel draft generation."},
+    )
+    dflash_num_draft_layers: int = field(
+        default=5,
+        metadata={"help": "Number of layers in the DFlash draft model."},
+    )
+    dflash_num_anchors: int = field(
+        default=512,
+        metadata={"help": "Number of anchor positions to sample per sequence for DFlash training."},
+    )
+    dflash_loss_decay_gamma: float | None = field(
+        default=None,
+        metadata={"help": "Gamma for exponential loss decay in DFlash training. None means no decay."},
+    )
+    dflash_attention_backend: Literal["flex_attention", "sdpa", "eager"] = field(
+        default="sdpa",
+        metadata={"help": "Attention backend for DFlash training: flex_attention, sdpa, or eager."},
+    )
+    dflash_target_layer_ids: str | None = field(
+        default=None,
+        metadata={
+            "help": "Comma-separated layer IDs from the target model to extract hidden states. "
+            "If None, layers are selected automatically based on num_draft_layers."
+        },
+    )
+    dflash_mask_token_id: int | None = field(
+        default=None,
+        metadata={"help": "MASK token ID for DFlash block diffusion. If None, auto-detect from tokenizer."},
+    )
+
+
+@dataclass
 class FinetuningArguments(
     SwanLabArguments,
     BAdamArgument,
@@ -450,6 +487,7 @@ class FinetuningArguments(
     LoraArguments,
     OFTArguments,
     FreezeArguments,
+    DFlashArguments,
 ):
     r"""Arguments pertaining to which techniques we are going to fine-tuning with."""
 
@@ -457,7 +495,7 @@ class FinetuningArguments(
         default=False,
         metadata={"help": "Whether or not to train model in purely bf16 precision (without AMP)."},
     )
-    stage: Literal["pt", "sft", "rm", "ppo", "dpo", "kto"] = field(
+    stage: Literal["pt", "sft", "rm", "ppo", "dpo", "kto", "dflash"] = field(
         default="sft",
         metadata={"help": "Which stage will be performed in training."},
     )
@@ -571,6 +609,11 @@ class FinetuningArguments(
         self.additional_target: list[str] | None = split_arg(self.additional_target)
         self.galore_target: list[str] = split_arg(self.galore_target)
         self.apollo_target: list[str] = split_arg(self.apollo_target)
+        self.dflash_target_layer_ids: list[int] | None = (
+            [int(x.strip()) for x in self.dflash_target_layer_ids.split(",")]
+            if isinstance(self.dflash_target_layer_ids, str)
+            else self.dflash_target_layer_ids
+        )
         self.use_ref_model = self.stage == "dpo" and self.pref_loss not in ["orpo", "simpo"]
 
         assert self.finetuning_type in ["lora", "oft", "freeze", "full"], "Invalid fine-tuning method."

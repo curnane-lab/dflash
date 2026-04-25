@@ -1,0 +1,157 @@
+from typing import TYPE_CHECKING, Optional
+
+import torch
+from transformers import DataCollatorForSeq2Seq
+
+from ...data import get_dataset, get_template_and_fix_tokenizer
+from ...extras import logging
+from ...extras.constants import IGNORE_INDEX
+from ...model import load_tokenizer
+from ...model.dflash import (
+    DFlashDraftModel,
+    HFDFlashTargetModel,
+    OnlineDFlashModel,
+    TargetEmbeddingsAndHead,
+    build_target_layer_ids,
+)
+from .trainer import DFlashTrainer
+
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, Seq2SeqTrainingArguments, TrainerCallback
+
+    from ...hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
+
+
+logger = logging.get_logger(__name__)
+
+
+def run_dflash(
+    model_args: "ModelArguments",
+    data_args: "DataArguments",
+    training_args: "Seq2SeqTrainingArguments",
+    finetuning_args: "FinetuningArguments",
+    generating_args: "GeneratingArguments",
+    callbacks: Optional[list["TrainerCallback"]] = None,
+):
+    tokenizer_module = load_tokenizer(model_args)
+    tokenizer = tokenizer_module["tokenizer"]
+    template = get_template_and_fix_tokenizer(tokenizer, data_args)
+    dataset_module = get_dataset(template, model_args, data_args, training_args, stage="dflash", **tokenizer_module)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    logger.info_rank0("Loading DFlash target model...")
+    target_model = HFDFlashTargetModel.from_pretrained(
+        pretrained_model_name_or_path=model_args.model_name_or_path,
+        torch_dtype=dtype,
+        device=device,
+        cache_dir=model_args.cache_dir,
+        trust_remote_code=model_args.trust_remote_code,
+    )
+
+    logger.info_rank0("Loading target model embeddings and lm_head...")
+    target_components = TargetEmbeddingsAndHead.from_pretrained(
+        model_path=model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        device=device,
+        dtype=dtype,
+        trust_remote_code=model_args.trust_remote_code,
+    )
+
+    logger.info_rank0("Creating DFlash draft model...")
+    from transformers import AutoConfig
+
+    target_config = AutoConfig.from_pretrained(
+        model_args.model_name_or_path,
+        trust_remote_code=model_args.trust_remote_code,
+        cache_dir=model_args.cache_dir,
+    )
+
+    num_target_layers = getattr(target_config, "num_hidden_layers", 32)
+    num_draft_layers = finetuning_args.dflash_num_draft_layers
+
+    if finetuning_args.dflash_target_layer_ids is not None:
+        target_layer_ids = finetuning_args.dflash_target_layer_ids
+    else:
+        target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+
+    logger.info_rank0(f"Target layer IDs for hidden state extraction: {target_layer_ids}")
+
+    draft_config = AutoConfig.from_pretrained(
+        model_args.model_name_or_path,
+        trust_remote_code=model_args.trust_remote_code,
+        cache_dir=model_args.cache_dir,
+    )
+    draft_config.num_hidden_layers = num_draft_layers
+    draft_config.block_size = finetuning_args.dflash_block_size
+    draft_config.num_target_layers = num_target_layers
+    draft_config.dflash_config = {
+        "mask_token_id": finetuning_args.dflash_mask_token_id,
+        "target_layer_ids": target_layer_ids,
+    }
+
+    if not hasattr(draft_config, "layer_types") or draft_config.layer_types is None:
+        draft_config.layer_types = ["full_attention"] * num_draft_layers
+    else:
+        draft_config.layer_types = ["full_attention"] * num_draft_layers
+
+    draft_model = DFlashDraftModel(draft_config)
+    draft_model = draft_model.to(device=device, dtype=dtype)
+    logger.info_rank0(f"DFlash draft model created with {num_draft_layers} layers, block_size={finetuning_args.dflash_block_size}")
+
+    target_model.set_capture_layers(target_layer_ids)
+
+    mask_token_id = finetuning_args.dflash_mask_token_id
+    if mask_token_id is None:
+        mask_token = getattr(tokenizer, "mask_token", None)
+        if mask_token is not None:
+            mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
+        else:
+            mask_token_id = tokenizer.vocab_size - 1
+            logger.warning_rank0(f"No MASK token found in tokenizer, using token_id={mask_token_id}")
+
+    dflash_model = OnlineDFlashModel(
+        draft_model=draft_model,
+        target_lm_head=target_components.lm_head,
+        target_embed_tokens=target_components.embed_tokens,
+        mask_token_id=mask_token_id,
+        block_size=finetuning_args.dflash_block_size,
+        attention_backend=finetuning_args.dflash_attention_backend,
+        num_anchors=finetuning_args.dflash_num_anchors,
+        loss_decay_gamma=finetuning_args.dflash_loss_decay_gamma,
+    )
+
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=None,
+        padding=True,
+        pad_to_multiple_of=8 if training_args.do_train else None,
+        label_pad_token_id=IGNORE_INDEX if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id,
+        return_tensors="pt",
+    )
+
+    trainer = DFlashTrainer(
+        dflash_model=dflash_model,
+        target_model=target_model,
+        finetuning_args=finetuning_args,
+        model_args=model_args,
+        args=training_args,
+        data_collator=data_collator,
+        callbacks=callbacks,
+        **dataset_module,
+        **tokenizer_module,
+    )
+
+    if training_args.do_train:
+        train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        trainer.save_model()
+        trainer.log_metrics("train", train_result.metrics)
+        trainer.save_metrics("train", train_result.metrics)
+        trainer.save_state()
+
+    if training_args.do_eval:
+        metrics = trainer.evaluate(metric_key_prefix="eval")
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
