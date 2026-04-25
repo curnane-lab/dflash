@@ -29,19 +29,70 @@ from ...base import BaseKernel
 from ...registry import register_kernel
 
 
-def npu_rms_norm_forward(self, hidden_states):
-    """NPU forward implementation for RMSNorm.
+def _should_use_residual_rmsnorm(module):
+    """Detect whether the module uses residual RMSNorm parameterization.
 
-    Args:
-        self: RMSNorm module instance with `weight` and `variance_epsilon`.
-        hidden_states (Tensor): Input hidden states tensor, same shape as the baseline.
+    Residual RMSNorm: scale = 1.0 + weight (weight initialized to 0)
+    Standard RMSNorm: scale = weight (weight initialized to 1)
 
-    Returns:
-        Tensor: Normalized tensor consistent with the baseline RMSNorm behavior.
+    This detection ensures compatibility with future model versions (e.g., Qwen3.6, Qwen4.0)
+    without hardcoding version numbers.
     """
+    if hasattr(module, "weight") and module.weight is not None:
+        weight_mean = module.weight.data.mean().item()
+        if abs(weight_mean) < 0.3:
+            return True
+
+    class_name = module.__class__.__name__
+    residual_patterns = ["Qwen3_5", "Qwen3_6", "Qwen4"]
+    for pattern in residual_patterns:
+        if pattern in class_name:
+            return True
+
+    return False
+
+
+def npu_rms_norm_forward(self, hidden_states):
+    """NPU forward implementation for standard RMSNorm."""
     import torch_npu
 
-    return torch_npu.npu_rms_norm(hidden_states, self.weight, epsilon=self.variance_epsilon)[0]
+    _eps = getattr(self, "variance_epsilon", None) or getattr(self, "eps", 1e-6)
+
+    if hasattr(self, "weight") and self.weight is not None:
+        if _should_use_residual_rmsnorm(self):
+            effective_weight = 1.0 + self.weight.float()
+        else:
+            effective_weight = self.weight.float()
+
+    return torch_npu.npu_rms_norm(hidden_states, effective_weight.to(hidden_states.dtype), epsilon=_eps)[0]
+
+
+def npu_gated_rms_norm_forward(self, hidden_states, gate=None):
+    """NPU forward implementation for Gated RMSNorm.
+
+    This function is optimized for Qwen3.5's hybrid attention mechanism with
+    high-precision FP32 computation for numerical stability.
+    """
+    import torch
+    import torch.nn.functional as F
+    import torch_npu
+
+    input_dtype = hidden_states.dtype
+
+    hidden_states = hidden_states.to(torch.float32)
+    _eps = getattr(self, "variance_epsilon", None) or getattr(self, "eps", 1e-6)
+
+    if _should_use_residual_rmsnorm(self):
+        effective_weight = 1.0 + self.weight.float()
+    else:
+        effective_weight = self.weight.float()
+
+    hidden_states = torch_npu.npu_rms_norm(hidden_states, effective_weight, epsilon=_eps)[0]
+
+    if gate is not None:
+        hidden_states = hidden_states * F.silu(gate.to(torch.float32))
+
+    return hidden_states.to(input_dtype)
 
 
 @register_kernel
@@ -53,25 +104,7 @@ class NpuRMSNormKernel(BaseKernel):
 
     @classmethod
     def apply(cls, **kwargs) -> "HFModel":
-        """Iterate the model and apply NPU-optimized forward to matched RMSNorm modules.
-
-        Key points:
-        - Match modules whose class name contains "RMSNorm" (case-insensitive).
-        - Bind `_npu_rms_forward` as an instance method via `types.MethodType` to
-          replace the original `forward`.
-        - Do not modify weights, hyperparameters, or module structure to ensure
-          numerical behavior and interface consistency.
-
-        Args:
-            **kwargs: Keyword arguments containing the model.
-
-        Returns:
-            HFModel: The model with NPU fused RMSNorm.
-
-        Raises:
-            RuntimeError: If torch_npu is not available.
-            ValueError: If the model is not provided.
-        """
+        """Iterate the model and apply NPU-optimized forward to matched RMSNorm modules."""
         model = kwargs.get("model")
         if model is None:
             raise ValueError(f"HFModel instance is required for {cls.__name__}.")
@@ -82,10 +115,10 @@ class NpuRMSNormKernel(BaseKernel):
         rms_norm_pattern = re.compile("RMSNorm", re.IGNORECASE)
 
         for name, module in model.named_modules():
-            # Match any module whose class name contains "RMSNorm"
             if re.search(rms_norm_pattern, module.__class__.__name__):
-                # Bind function as an instance method to preserve `self` semantics
-                # and replace the original forward
-                module.forward = types.MethodType(npu_rms_norm_forward, module)
+                if "Gated" in module.__class__.__name__:
+                    module.forward = types.MethodType(npu_gated_rms_norm_forward, module)
+                else:
+                    module.forward = types.MethodType(npu_rms_norm_forward, module)
 
         return model
