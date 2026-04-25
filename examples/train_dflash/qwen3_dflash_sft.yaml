@@ -1,0 +1,56 @@
+# DFlash speculative decoding draft model training for Qwen3-8B
+# Usage:
+#   llamafactory-cli train examples/train_dflash/qwen3_dflash_sft.yaml
+
+### model
+model_name_or_path: Qwen/Qwen3-8B
+trust_remote_code: true
+flash_attn: fa2
+
+### method
+stage: dflash
+do_train: true
+finetuning_type: full
+
+### dflash
+dflash_block_size: 16
+dflash_num_draft_layers: 5
+dflash_num_anchors: 512
+dflash_loss_decay_gamma: 7.0
+dflash_attention_backend: sdpa
+
+### dataset
+dataset: identity,alpaca_en_demo
+template: qwen3
+cutoff_len: 3072
+max_samples: 10000
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/Qwen3-8B/dflash/sft
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: true
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 6.0e-4
+num_train_epochs: 6.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.04
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+max_grad_norm: 0.5
+
+### eval
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# eval_strategy: steps
+# eval_steps: 500
