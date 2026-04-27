@@ -84,6 +84,13 @@ def run_dflash(
         trust_remote_code=model_args.trust_remote_code,
         cache_dir=model_args.cache_dir,
     )
+
+    text_config = getattr(draft_config, "text_config", None)
+    if text_config is not None:
+        source_config = text_config
+    else:
+        source_config = draft_config
+
     draft_config.num_hidden_layers = num_draft_layers
     draft_config.block_size = finetuning_args.dflash_block_size
     draft_config.num_target_layers = num_target_layers
@@ -91,11 +98,17 @@ def run_dflash(
         "mask_token_id": finetuning_args.dflash_mask_token_id,
         "target_layer_ids": target_layer_ids,
     }
+    draft_config.layer_types = ["full_attention"] * num_draft_layers
 
-    if not hasattr(draft_config, "layer_types") or draft_config.layer_types is None:
-        draft_config.layer_types = ["full_attention"] * num_draft_layers
+    if hasattr(source_config, "rope_parameters") and source_config.rope_parameters is not None:
+        draft_config.rope_parameters = source_config.rope_parameters
+    elif hasattr(source_config, "partial_rotary_factor"):
+        draft_config.partial_rotary_factor = source_config.partial_rotary_factor
     else:
-        draft_config.layer_types = ["full_attention"] * num_draft_layers
+        draft_config.partial_rotary_factor = getattr(source_config, "partial_rotary_factor", 1.0)
+
+    if hasattr(source_config, "rope_theta"):
+        draft_config.rope_theta = source_config.rope_theta
 
     draft_model = DFlashDraftModel(draft_config)
     draft_model = draft_model.to(device=device, dtype=dtype)

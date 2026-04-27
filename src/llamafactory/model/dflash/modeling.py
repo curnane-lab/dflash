@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -11,7 +12,6 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Config,
     Qwen3MLP,
     Qwen3PreTrainedModel,
-    Qwen3RMSNorm,
     Qwen3RotaryEmbedding,
     eager_attention_forward,
     rotate_half,
@@ -19,16 +19,43 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from typing_extensions import Tuple, Unpack
 
 
+class Qwen3_5DFlashRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.variance_epsilon = eps
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
+
+    def forward(self, hidden_states):
+        output = self._norm(hidden_states.float())
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(hidden_states)
+
+
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
-    q_len = q.size(-2)
-    q_embed = (q * cos[..., -q_len:, :]) + (rotate_half(q) * sin[..., -q_len:, :])
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    rotary_dim = cos.shape[-1]
+    query_dim = q.shape[-1]
+    if rotary_dim < query_dim:
+        q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+        k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+        q_len = q_rot.size(-2)
+        q_embed = (q_rot * cos[..., -q_len:, :]) + (rotate_half(q_rot) * sin[..., -q_len:, :])
+        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+        q_embed = torch.cat([q_embed, q_pass], dim=-1)
+        k_embed = torch.cat([k_embed, k_pass], dim=-1)
+        return q_embed, k_embed
+    else:
+        q_len = q.size(-2)
+        q_embed = (q * cos[..., -q_len:, :]) + (rotate_half(q) * sin[..., -q_len:, :])
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        return q_embed, k_embed
 
 
-class Qwen3DFlashAttention(nn.Module):
+class Qwen3_5DFlashAttention(nn.Module):
 
     def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
@@ -39,13 +66,13 @@ class Qwen3DFlashAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = False
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias)
+        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim * 2, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias)
-        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+        self.q_norm = Qwen3_5DFlashRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = Qwen3_5DFlashRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.sliding_window = config.sliding_window if getattr(config, "layer_types", [None])[layer_idx] == "sliding_attention" else None
 
     def forward(
         self,
@@ -57,11 +84,17 @@ class Qwen3DFlashAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        bsz, q_len = hidden_states.shape[:-1]
+        bsz, q_len, _ = hidden_states.shape
         ctx_len = target_hidden.shape[1]
-        q = self.q_proj(hidden_states)
-        q = q.view(bsz, q_len, -1, self.head_dim)
-        q = self.q_norm(q).transpose(1, 2)
+        input_shape = (bsz, q_len)
+        hidden_shape = (bsz, q_len, -1, self.head_dim)
+
+        q_output = self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2)
+        query_states, gate = torch.chunk(q_output, 2, dim=-1)
+        gate = gate.reshape(*input_shape, -1)
+
+        query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+
         k_ctx = self.k_proj(target_hidden)
         k_noise = self.k_proj(hidden_states)
         v_ctx = self.v_proj(target_hidden)
@@ -70,18 +103,21 @@ class Qwen3DFlashAttention(nn.Module):
         v = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
         k = self.k_norm(k).transpose(1, 2)
         v = v.transpose(1, 2)
+
         cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(query_states, k, cos, sin)
+
         if past_key_values is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
+            key_states, v = past_key_values.update(key_states, v, self.layer_idx, cache_kwargs)
+
         attn_fn = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attn_fn = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
         attn_output, attn_weights = attn_fn(
             self,
-            q,
-            k,
+            query_states,
+            key_states,
             v,
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
@@ -89,19 +125,20 @@ class Qwen3DFlashAttention(nn.Module):
             sliding_window=self.sliding_window,
             **kwargs,
         )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = attn_output * torch.sigmoid(gate)
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
 
-class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
+class Qwen3_5DFlashDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Qwen3DFlashAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = Qwen3_5DFlashAttention(config=config, layer_idx=layer_idx)
         self.mlp = Qwen3MLP(config)
-        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = Qwen3_5DFlashRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3_5DFlashRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -158,25 +195,30 @@ def extract_context_feature(hidden_states: list[torch.Tensor], layer_ids: Option
 
 class DFlashDraftModel(Qwen3PreTrainedModel):
     config_class = Qwen3Config
-    _no_split_modules = ["Qwen3DFlashDecoderLayer"]
+    _no_split_modules = ["Qwen3_5DFlashDecoderLayer"]
 
     def __init__(self, config) -> None:
         super().__init__(config)
         self.config = config
         self.layers = nn.ModuleList(
-            [Qwen3DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [Qwen3_5DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         dflash_config = getattr(config, "dflash_config", {}) or {}
         self.target_layer_ids = dflash_config.get(
             "target_layer_ids", build_target_layer_ids(config.num_target_layers, config.num_hidden_layers)
         )
-        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Qwen3_5DFlashRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen3RotaryEmbedding(config)
         self.fc = nn.Linear(len(self.target_layer_ids) * config.hidden_size, config.hidden_size, bias=False)
-        self.hidden_norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hidden_norm = Qwen3_5DFlashRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.block_size = config.block_size
         self.mask_token_id = dflash_config.get("mask_token_id", None)
         self.post_init()
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, Qwen3_5DFlashRMSNorm):
+            nn.init.zeros_(module.weight)
 
     def forward(
         self,
