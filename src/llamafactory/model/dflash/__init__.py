@@ -1,8 +1,7 @@
 from .modeling import (
     DFlashDraftModel,
-    Qwen3_5DFlashAttention,
-    Qwen3_5DFlashDecoderLayer,
-    Qwen3_5DFlashRMSNorm,
+    Qwen3DFlashAttention,
+    Qwen3DFlashDecoderLayer,
     build_target_layer_ids,
     extract_context_feature,
 )
@@ -12,9 +11,8 @@ from .target import DFlashTargetModel, HFDFlashTargetModel, TargetEmbeddingsAndH
 
 __all__ = [
     "DFlashDraftModel",
-    "Qwen3_5DFlashAttention",
-    "Qwen3_5DFlashDecoderLayer",
-    "Qwen3_5DFlashRMSNorm",
+    "Qwen3DFlashAttention",
+    "Qwen3DFlashDecoderLayer",
     "build_target_layer_ids",
     "extract_context_feature",
     "OnlineDFlashModel",
