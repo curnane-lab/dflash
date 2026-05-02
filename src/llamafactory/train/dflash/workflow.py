@@ -137,35 +137,38 @@ def run_dflash(
     else:
         source_config = draft_config
 
-    draft_config.num_hidden_layers = num_draft_layers
-    draft_config.block_size = finetuning_args.dflash_block_size
-    draft_config.num_target_layers = num_target_layers
-    draft_config.dflash_config = {
+    # Use source_config (text_config) as the draft config, because Qwen3_5Config
+    # (multimodal wrapper) does not have hidden_size / num_attention_heads etc.
+    # All DFlash-specific attributes are set on source_config instead.
+    source_config.num_hidden_layers = num_draft_layers
+    source_config.block_size = finetuning_args.dflash_block_size
+    source_config.num_target_layers = num_target_layers
+    source_config.dflash_config = {
         "mask_token_id": finetuning_args.dflash_mask_token_id,
         "target_layer_ids": target_layer_ids,
     }
-    draft_config.layer_types = ["full_attention"] * num_draft_layers
+    source_config.layer_types = ["full_attention"] * num_draft_layers
 
     if hasattr(source_config, "rope_parameters") and source_config.rope_parameters is not None:
-        draft_config.rope_parameters = source_config.rope_parameters
+        source_config.rope_parameters = source_config.rope_parameters
     elif hasattr(source_config, "partial_rotary_factor"):
-        draft_config.partial_rotary_factor = source_config.partial_rotary_factor
+        source_config.partial_rotary_factor = source_config.partial_rotary_factor
     else:
-        draft_config.partial_rotary_factor = getattr(source_config, "partial_rotary_factor", 1.0)
+        source_config.partial_rotary_factor = getattr(source_config, "partial_rotary_factor", 1.0)
 
     if hasattr(source_config, "rope_theta"):
-        draft_config.rope_theta = source_config.rope_theta
+        source_config.rope_theta = source_config.rope_theta
 
     if finetuning_args.dflash_pretrained_model_path is not None:
         logger.info_rank0(f"Loading pretrained DFlash draft model from {finetuning_args.dflash_pretrained_model_path}")
         draft_model = DFlashDraftModel.from_pretrained(
             finetuning_args.dflash_pretrained_model_path,
-            config=draft_config,
+            config=source_config,
             trust_remote_code=model_args.trust_remote_code,
         )
         draft_model = draft_model.to(device=device, dtype=dtype)
     else:
-        draft_model = DFlashDraftModel(draft_config)
+        draft_model = DFlashDraftModel(source_config)
         draft_model = draft_model.to(device=device, dtype=dtype)
     logger.info_rank0(f"DFlash draft model ready with {num_draft_layers} layers, block_size={finetuning_args.dflash_block_size}")
 
