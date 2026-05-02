@@ -51,16 +51,7 @@ def run_dflash(
         trust_remote_code=model_args.trust_remote_code,
     )
 
-    logger.info_rank0("Loading target model embeddings and lm_head...")
-    target_components = TargetEmbeddingsAndHead.from_pretrained(
-        model_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        device=device,
-        dtype=dtype,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    logger.info_rank0("Creating DFlash draft model...")
+    logger.info_rank0("Loading target config...")
     from transformers import AutoConfig
 
     target_config = AutoConfig.from_pretrained(
@@ -68,6 +59,61 @@ def run_dflash(
         trust_remote_code=model_args.trust_remote_code,
         cache_dir=model_args.cache_dir,
     )
+
+    text_config = getattr(target_config, "text_config", None)
+    source_config = text_config if text_config is not None else target_config
+
+    logger.info_rank0("Extracting target model embeddings and lm_head...")
+    target_components = TargetEmbeddingsAndHead(source_config)
+    # Copy weights from the already-loaded HF target model instead of re-parsing checkpoint files.
+    # This bypasses issues where .index.json omits embed_tokens keys (e.g., Qwen3.5 VLM checkpoints).
+    # Supports: model.embed_tokens, model.language_model.embed_tokens, model.text_model.embed_tokens
+    hf_model = target_model.model
+    embed_tokens_src = None
+    # 1. Standard Qwen/Qwen2/Qwen3: model.model.embed_tokens
+    if hasattr(hf_model, "model") and hasattr(hf_model.model, "embed_tokens"):
+        embed_tokens_src = hf_model.model.embed_tokens
+        logger.info_rank0("Found embed_tokens at hf_model.model.embed_tokens")
+    # 2. Qwen3.5 VLM: model.language_model.embed_tokens
+    elif hasattr(hf_model, "model") and hasattr(hf_model.model, "language_model"):
+        lm = hf_model.model.language_model
+        if hasattr(lm, "embed_tokens"):
+            embed_tokens_src = lm.embed_tokens
+            logger.info_rank0("Found embed_tokens at hf_model.model.language_model.embed_tokens (Qwen3.5 VLM)")
+        elif hasattr(lm, "model") and hasattr(lm.model, "embed_tokens"):
+            embed_tokens_src = lm.model.embed_tokens
+            logger.info_rank0("Found embed_tokens at hf_model.model.language_model.model.embed_tokens")
+    # 3. Qwen3.5 multimodal: model.text_model.embed_tokens
+    elif hasattr(hf_model, "model") and hasattr(hf_model.model, "text_model"):
+        if hasattr(hf_model.model.text_model, "embed_tokens"):
+            embed_tokens_src = hf_model.model.text_model.embed_tokens
+            logger.info_rank0("Found embed_tokens at hf_model.model.text_model.embed_tokens")
+    if embed_tokens_src is not None:
+        target_components.embed_tokens.weight.data.copy_(embed_tokens_src.weight.data)
+    else:
+        raise ValueError(f"Cannot find embed_tokens in target model. Type: {type(hf_model).__name__}")
+
+    lm_head_src = None
+    # 1. Standard: model.lm_head
+    if hasattr(hf_model, "lm_head"):
+        lm_head_src = hf_model.lm_head
+        logger.info_rank0("Found lm_head at hf_model.lm_head")
+    # 2. Qwen3.5 VLM: model.language_model.lm_head
+    elif hasattr(hf_model, "model") and hasattr(hf_model.model, "language_model"):
+        lm = hf_model.model.language_model
+        if hasattr(lm, "lm_head"):
+            lm_head_src = lm.lm_head
+            logger.info_rank0("Found lm_head at hf_model.model.language_model.lm_head (Qwen3.5 VLM)")
+    if lm_head_src is not None:
+        target_components.lm_head.weight.data.copy_(lm_head_src.weight.data)
+    else:
+        raise ValueError(f"Cannot find lm_head in target model. Type: {type(hf_model).__name__}")
+
+    target_components = target_components.to(device=device, dtype=dtype)
+    target_components.eval()
+    target_components.requires_grad_(False)
+
+    logger.info_rank0("Creating DFlash draft model...")
 
     num_target_layers = getattr(target_config, "num_hidden_layers", 32)
     num_draft_layers = finetuning_args.dflash_num_draft_layers
@@ -110,9 +156,18 @@ def run_dflash(
     if hasattr(source_config, "rope_theta"):
         draft_config.rope_theta = source_config.rope_theta
 
-    draft_model = DFlashDraftModel(draft_config)
-    draft_model = draft_model.to(device=device, dtype=dtype)
-    logger.info_rank0(f"DFlash draft model created with {num_draft_layers} layers, block_size={finetuning_args.dflash_block_size}")
+    if finetuning_args.dflash_pretrained_model_path is not None:
+        logger.info_rank0(f"Loading pretrained DFlash draft model from {finetuning_args.dflash_pretrained_model_path}")
+        draft_model = DFlashDraftModel.from_pretrained(
+            finetuning_args.dflash_pretrained_model_path,
+            config=draft_config,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+        draft_model = draft_model.to(device=device, dtype=dtype)
+    else:
+        draft_model = DFlashDraftModel(draft_config)
+        draft_model = draft_model.to(device=device, dtype=dtype)
+    logger.info_rank0(f"DFlash draft model ready with {num_draft_layers} layers, block_size={finetuning_args.dflash_block_size}")
 
     target_model.set_capture_layers(target_layer_ids)
 

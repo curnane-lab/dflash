@@ -144,8 +144,22 @@ class TargetEmbeddingsAndHead(nn.Module):
         files_to_load = {}
 
         # Candidate keys for embedding and lm_head, ordered by preference
-        embed_candidates = [embed_key, "model.embed_tokens.weight", "embed_tokens.weight", "model.tok_embeddings.weight", "transformer.wte.weight"]
-        head_candidates = [lm_head_key, "lm_head.weight", "model.lm_head.weight", "output.weight"]
+        # Qwen3.5 VLM uses model.language_model.embed_tokens / model.language_model.lm_head
+        embed_candidates = [
+            embed_key,
+            "model.language_model.embed_tokens.weight",
+            "model.embed_tokens.weight",
+            "embed_tokens.weight",
+            "model.tok_embeddings.weight",
+            "transformer.wte.weight",
+        ]
+        head_candidates = [
+            lm_head_key,
+            "model.language_model.lm_head.weight",
+            "lm_head.weight",
+            "model.lm_head.weight",
+            "output.weight",
+        ]
 
         def _find_key(candidates, weight_map_or_keys):
             for cand in candidates:

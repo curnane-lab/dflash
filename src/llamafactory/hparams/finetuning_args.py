@@ -475,6 +475,10 @@ class DFlashArguments:
         default=None,
         metadata={"help": "MASK token ID for DFlash block diffusion. If None, auto-detect from tokenizer."},
     )
+    dflash_pretrained_model_path: str | None = field(
+        default=None,
+        metadata={"help": "Path to a pretrained DFlash draft model checkpoint for warm-start training."},
+    )
 
 
 @dataclass
