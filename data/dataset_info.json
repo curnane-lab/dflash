@@ -1,4 +1,17 @@
 {
+  "open_perfectblend_distilled_60k": {
+    "file_name": "/home/f00538480/dataset/open-perfectblend/distilled_60k.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "human",
+      "assistant_tag": "gpt"
+    }
+  },
   "identity": {
     "file_name": "identity.json"
   },

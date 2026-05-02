@@ -7,7 +7,7 @@
 # Note: Change `num_processes` in fsdp2_config_qwen35.yaml to match your NPU count
 
 ### model
-model_name_or_path: /data1/f00538480/Qwen3.5-4B/
+model_name_or_path: /home/f00538480/Qwen3.5-4B/
 trust_remote_code: true
 use_v1_kernels: true
 flash_attn: fa2
@@ -25,8 +25,7 @@ dflash_loss_decay_gamma: 7.0
 dflash_attention_backend: sdpa
 
 ### dataset
-dataset: HW_Chinese
-dataset_dir: /data1/f00538480/dataset/HW_Chinese/
+dataset: open_perfectblend_distilled_60k
 template: qwen3_5_nothink
 cutoff_len: 3072
 overwrite_cache: true
