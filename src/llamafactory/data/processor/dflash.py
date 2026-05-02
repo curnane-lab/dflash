@@ -81,9 +81,6 @@ class DFlashDatasetProcessor(DatasetProcessor):
             model_inputs["attention_mask"].append([1] * len(input_ids))
             model_inputs["labels"].append(labels)
             model_inputs["loss_mask"].append(loss_mask)
-            model_inputs["images"].append(examples["_images"][i])
-            model_inputs["videos"].append(examples["_videos"][i])
-            model_inputs["audios"].append(examples["_audios"][i])
 
         return model_inputs
 
