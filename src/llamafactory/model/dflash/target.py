@@ -115,6 +115,9 @@ class TargetEmbeddingsAndHead(nn.Module):
         trust_remote_code: bool = False,
     ) -> "TargetEmbeddingsAndHead":
         config = AutoConfig.from_pretrained(model_path, cache_dir=cache_dir, trust_remote_code=trust_remote_code)
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            config = text_config
         instance = cls(config)
         if embed_key is None:
             embed_key = "model.embed_tokens.weight"
