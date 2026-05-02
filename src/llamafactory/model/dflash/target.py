@@ -142,17 +142,31 @@ class TargetEmbeddingsAndHead(nn.Module):
         index_files = glob.glob(os.path.join(model_path, "*.index.json"))
         weight_map = {}
         files_to_load = {}
+
+        # Candidate keys for embedding and lm_head, ordered by preference
+        embed_candidates = [embed_key, "model.embed_tokens.weight", "embed_tokens.weight", "model.tok_embeddings.weight", "transformer.wte.weight"]
+        head_candidates = [lm_head_key, "lm_head.weight", "model.lm_head.weight", "output.weight"]
+
+        def _find_key(candidates, weight_map_or_keys):
+            for cand in candidates:
+                if cand in weight_map_or_keys:
+                    return cand
+            return None
+
         if index_files:
             with open(index_files[0], "r") as f:
                 index = json.load(f)
             weight_map = index.get("weight_map", {})
-            if embed_key in weight_map:
-                files_to_load[embed_key] = weight_map[embed_key]
-            else:
-                raise ValueError(f"Embedding key '{embed_key}' not found in weight map.")
+
+            actual_embed_key = _find_key(embed_candidates, weight_map)
+            if actual_embed_key is None:
+                raise ValueError(f"Embedding key not found in weight map. Tried: {embed_candidates}")
+            files_to_load[actual_embed_key] = weight_map[actual_embed_key]
+
             if not tie_weights:
-                if lm_head_key in weight_map:
-                    files_to_load[lm_head_key] = weight_map[lm_head_key]
+                actual_head_key = _find_key(head_candidates, weight_map)
+                if actual_head_key is not None:
+                    files_to_load[actual_head_key] = weight_map[actual_head_key]
         else:
             safetensors = glob.glob(os.path.join(model_path, "*.safetensors"))
             bins = glob.glob(os.path.join(model_path, "*.bin"))
@@ -171,8 +185,11 @@ class TargetEmbeddingsAndHead(nn.Module):
                 file_to_keys_map[full_path] = []
             file_to_keys_map[full_path].append(key)
 
+        # Pass the actual resolved keys to _load_file_content so it knows what to look for
+        actual_embed = _find_key(embed_candidates, weight_map) if weight_map else embed_key
+        actual_head = _find_key(head_candidates, weight_map) if weight_map else lm_head_key
         for file_path, keys in file_to_keys_map.items():
-            self._load_file_content(file_path, keys, embed_key, lm_head_key)
+            self._load_file_content(file_path, keys, actual_embed or embed_key, actual_head or lm_head_key)
             loaded_keys.update(keys)
 
         if tie_weights:
