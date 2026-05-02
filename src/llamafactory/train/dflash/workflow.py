@@ -39,8 +39,17 @@ def run_dflash(
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="dflash", **tokenizer_module)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    import os
+    local_rank = int(os.environ.get("LOCAL_RANK", getattr(training_args, "local_rank", 0)))
+    if torch.cuda.is_available():
+        device = f"cuda:{local_rank}"
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    elif hasattr(torch, "npu") and torch.npu.is_available():
+        device = f"npu:{local_rank}"
+        dtype = torch.bfloat16
+    else:
+        device = "cpu"
+        dtype = torch.float16
 
     logger.info_rank0("Loading DFlash target model...")
     target_model = HFDFlashTargetModel.from_pretrained(

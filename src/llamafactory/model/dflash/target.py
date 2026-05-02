@@ -73,6 +73,12 @@ class HFDFlashTargetModel(DFlashTargetModel):
     def generate_dflash_data(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor, loss_mask: torch.Tensor
     ) -> DFlashTargetOutput:
+        # Ensure inputs are on the same device as the model (handles accelerate/FSDP multi-device)
+        model_device = next(self.model.parameters()).device
+        if input_ids.device != model_device:
+            input_ids = input_ids.to(model_device)
+        if attention_mask.device != model_device:
+            attention_mask = attention_mask.to(model_device)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
