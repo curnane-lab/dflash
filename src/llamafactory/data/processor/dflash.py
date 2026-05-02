@@ -75,12 +75,10 @@ class DFlashDatasetProcessor(DatasetProcessor):
                 videos=examples["_videos"][i] or [],
                 audios=examples["_audios"][i] or [],
             )
-            loss_mask = [1 if label != IGNORE_INDEX else 0 for label in labels]
 
             model_inputs["input_ids"].append(input_ids)
             model_inputs["attention_mask"].append([1] * len(input_ids))
             model_inputs["labels"].append(labels)
-            model_inputs["loss_mask"].append(loss_mask)
 
         return model_inputs
 
