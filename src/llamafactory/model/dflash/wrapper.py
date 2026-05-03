@@ -73,7 +73,12 @@ class OnlineDFlashModel(nn.Module):
         valid_counts = valid.sum(dim=1)
         max_n = min(self.num_anchors, int(valid_counts.max().item()) - 1)
         if max_n <= 0:
-            raise ValueError("No valid anchor positions found. Check your data and loss_mask.")
+            # Sequence too short to host any anchor blocks; return empty tensors.
+            # Forward will compute zero loss for this batch.
+            return (
+                torch.empty((bsz, 0), dtype=torch.long, device=device),
+                torch.empty((bsz, 0), dtype=torch.bool, device=device),
+            )
         indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
         masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
         random_vals = torch.rand(bsz, max_anchor + 1, device=device)
