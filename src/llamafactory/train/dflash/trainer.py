@@ -77,7 +77,6 @@ class DFlashTrainer(Trainer):
     def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         import os
-        from safetensors.torch import save_file
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -86,8 +85,10 @@ class DFlashTrainer(Trainer):
             draft_model = self.dflash_model.draft_model
             draft_model.config.save_pretrained(output_dir)
 
-            # Move all tensors to CPU before saving to avoid invalid NPU storage pointer
-            state_dict = {k: v.detach().cpu().contiguous() for k, v in draft_model.state_dict().items()}
-            save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
+            # Use torch.save (.bin format) instead of safetensors to bypass the
+            # _find_shared_tensors storage_ptr issue on NPU. Clone ensures each
+            # tensor has its own independent CPU storage.
+            state_dict = {k: v.detach().cpu().clone() for k, v in draft_model.state_dict().items()}
+            torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
 
             logger.info_rank0(f"DFlash draft model saved to {output_dir}")
