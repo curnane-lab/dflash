@@ -20,7 +20,7 @@ finetuning_type: full
 ### dflash
 dflash_block_size: 16
 dflash_num_draft_layers: 5
-dflash_num_anchors: 256
+dflash_num_anchors: 186
 dflash_loss_decay_gamma: 7.0
 dflash_attention_backend: sdpa
 # Optional: warm-start from a pretrained DFlash draft model checkpoint (e.g., z-lab/Qwen3.5-4B-DFlash)
