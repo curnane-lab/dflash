@@ -212,6 +212,17 @@ def run_dflash(
             trust_remote_code=model_args.trust_remote_code,
             ignore_mismatched_sizes=True,
         )
+
+        # Check target_layer_ids compatibility: if the pretrained checkpoint was trained
+        # with a different set of target layers, the fc layer weights are meaningless.
+        pretrained_target_layer_ids = pretrained_config.dflash_config.get("target_layer_ids", [])
+        if pretrained_target_layer_ids and pretrained_target_layer_ids != target_layer_ids:
+            logger.warning_rank0(
+                f"Pretrained target_layer_ids {pretrained_target_layer_ids} do not match "
+                f"current target_layer_ids {target_layer_ids}. Re-initializing fc layer."
+            )
+            nn.init.normal_(draft_model.fc.weight, mean=0.0, std=config.initializer_range)
+
         draft_model = draft_model.to(device=device, dtype=dtype)
     else:
         draft_model = DFlashDraftModel(source_config)
