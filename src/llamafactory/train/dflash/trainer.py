@@ -77,8 +77,17 @@ class DFlashTrainer(Trainer):
     def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         import os
+        from safetensors.torch import save_file
 
         os.makedirs(output_dir, exist_ok=True)
-        draft_model = self.dflash_model.draft_model
-        draft_model.save_pretrained(output_dir)
-        logger.info_rank0(f"DFlash draft model saved to {output_dir}")
+
+        # Only save on the main process to avoid NPU storage pointer issues in multi-card setup
+        if self.args.should_save and self.state.is_world_process_zero:
+            draft_model = self.dflash_model.draft_model
+            draft_model.config.save_pretrained(output_dir)
+
+            # Move all tensors to CPU before saving to avoid invalid NPU storage pointer
+            state_dict = {k: v.detach().cpu().contiguous() for k, v in draft_model.state_dict().items()}
+            save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
+
+            logger.info_rank0(f"DFlash draft model saved to {output_dir}")
