@@ -158,12 +158,9 @@ def run_dflash(
     }
     source_config.layer_types = ["full_attention"] * num_draft_layers
 
-    if hasattr(source_config, "rope_parameters") and source_config.rope_parameters is not None:
-        source_config.rope_parameters = source_config.rope_parameters
-    elif hasattr(source_config, "partial_rotary_factor"):
-        source_config.partial_rotary_factor = source_config.partial_rotary_factor
-    else:
-        source_config.partial_rotary_factor = getattr(source_config, "partial_rotary_factor", 1.0)
+    # Official dflash implementation uses full-dimension RoPE (partial_rotary_factor=1.0).
+    # The simplified apply_rotary_pos_emb does not support partial rotation.
+    source_config.partial_rotary_factor = 1.0
 
     if hasattr(source_config, "rope_theta"):
         source_config.rope_theta = source_config.rope_theta
@@ -187,9 +184,6 @@ def run_dflash(
             "target_layer_ids": target_layer_ids,
         }
         draft_config.layer_types = ["full_attention"] * num_draft_layers
-        # Pretrained Qwen3.5-4B-DFlash checkpoint uses Qwen3 non-gated attention (no attn_output_gate).
-        # We must match this architecture for weight compatibility.
-        draft_config.attn_output_gate = getattr(draft_config, "attn_output_gate", False)
         # Safety check: hidden_size must match target model for DFlash training
         if draft_config.hidden_size != source_config.hidden_size:
             raise ValueError(
@@ -201,9 +195,7 @@ def run_dflash(
             f"intermediate_size={getattr(draft_config, 'intermediate_size', 'N/A')}, "
             f"head_dim={getattr(draft_config, 'head_dim', 'N/A')}, "
             f"num_attention_heads={draft_config.num_attention_heads}, "
-            f"attn_output_gate={getattr(draft_config, 'attn_output_gate', False)}, "
-            f"rope_theta={getattr(draft_config, 'rope_theta', 'N/A')}, "
-            f"partial_rotary_factor={getattr(draft_config, 'partial_rotary_factor', 'N/A')}"
+            f"rope_theta={getattr(draft_config, 'rope_theta', 'N/A')}"
         )
 
         draft_model = DFlashDraftModel.from_pretrained(
