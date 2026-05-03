@@ -79,6 +79,7 @@ class Template:
         messages: list[dict[str, str]],
         system: Optional[str] = None,
         tools: Optional[str] = None,
+        discarding_history_cot: bool = False,  # only effect reasoning template
     ) -> list[tuple[list[int], list[int]]]:
         r"""Return multiple pairs of token ids representing prompts and responses respectively."""
         encoded_messages = self._encode(tokenizer, messages, system, tools)
@@ -441,14 +442,24 @@ class ReasoningTemplate(Template):
         messages: list[dict[str, str]],
         system: Optional[str] = None,
         tools: Optional[str] = None,
+        discarding_history_cot: bool = False,
     ) -> list[tuple[list[int], list[int]]]:
         messages = deepcopy(messages)
         if self.enable_thinking is False:  # remove all cot
             for i in range(1, len(messages), 2):
                 messages[i]["content"] = self.remove_thought(messages[i]["content"])
 
+        if discarding_history_cot:
+            for i in range(1, len(messages) - 2, 2):  # preserve the last cot
+                messages[i]["content"] = self.remove_thought(messages[i]["content"])
+
         encoded_messages = self._encode(tokenizer, messages, system, tools)
-        for i in range(0, len(messages), 2):
+        if discarding_history_cot:
+            turn_indices = [len(messages) - 2]
+        else:
+            turn_indices = range(0, len(messages), 2)
+
+        for i in turn_indices:
             if (
                 self.thought_words[0].strip() not in messages[i + 1]["content"]
                 and self.thought_words[1].strip() not in messages[i + 1]["content"]
@@ -823,6 +834,19 @@ register_template(
 
 
 register_template(
+    name="hy3",
+    format_user=StringFormatter(slots=["<｜hy_User｜>{{content}}<｜hy_Assistant｜>"]),
+    format_assistant=StringFormatter(slots=["{{content}}<｜hy_eos｜>"]),
+    format_system=StringFormatter(slots=["{{content}}"]),
+    format_prefix=EmptyFormatter(slots=[{"bos_token"}]),
+    stop_words=["<｜hy_eos｜>"],
+    replace_eos=True,
+    thought_words=("<think>", "</think>"),
+    template_class=ReasoningTemplate,
+)
+
+
+register_template(
     name="deepseekcoder",
     format_user=StringFormatter(slots=["### Instruction:\n{{content}}\n### Response:"]),
     format_assistant=StringFormatter(slots=["\n{{content}}\n<|EOT|>\n"]),
@@ -1007,15 +1031,17 @@ register_template(
     name="gemma4",
     format_user=StringFormatter(slots=["<|turn>user\n{{content}}<turn|>\n<|turn>model\n"]),
     format_assistant=StringFormatter(slots=["{{content}}<turn|>\n"]),
-    format_system=StringFormatter(slots=["<|turn>system\n<|think|>{{content}}<turn|>\n"]), #  default thought singal contained
+    format_system=StringFormatter(
+        slots=["<|turn>system\n<|think|>{{content}}<turn|>\n"]
+    ),  #  default thought singal contained
     format_observation=StringFormatter(
         slots=["<|turn>tool\n{{content}}<turn|>\n<|turn>model\n"]
-    ), # seem not consistent with the chattemplate
+    ),  # seem not consistent with the chattemplate
     format_tools=ToolFormatter(tool_format="gemma4"),
     format_function=FunctionFormatter(slots=["<|tool>{{content}}<tool|>"], tool_format="gemma4"),
     format_prefix=EmptyFormatter(slots=[{"bos_token"}]),
     stop_words=["<turn|>"],
-    default_system="You are a helpful assistant.", # important for thinking
+    default_system="You are a helpful assistant.",  # important for thinking
     thought_words=("<|channel>thought\n", "<channel|>"),
     replace_eos=True,
     mm_plugin=get_mm_plugin(
@@ -1031,15 +1057,15 @@ register_template(
     name="gemma4n",
     format_user=StringFormatter(slots=["<|turn>user\n{{content}}<turn|>\n<|turn>model\n"]),
     format_assistant=StringFormatter(slots=["{{content}}<turn|>\n"]),
-    format_system=StringFormatter(slots=["<|turn>system\n<|think|>{{content}}<turn|>\n"]), #  default thought singal contained
-    format_observation=StringFormatter(
-        slots=["<|turn>tool\n{{content}}<turn|>\n<|turn>model\n"]
-    ),
+    format_system=StringFormatter(
+        slots=["<|turn>system\n<|think|>{{content}}<turn|>\n"]
+    ),  #  default thought singal contained
+    format_observation=StringFormatter(slots=["<|turn>tool\n{{content}}<turn|>\n<|turn>model\n"]),
     format_tools=ToolFormatter(tool_format="gemma4"),
     format_function=FunctionFormatter(slots=["<|tool>{{content}}<tool|>"], tool_format="gemma4"),
     format_prefix=EmptyFormatter(slots=[{"bos_token"}]),
     stop_words=["<turn|>"],
-    default_system="You are a helpful assistant.", # important for thinking
+    default_system="You are a helpful assistant.",  # important for thinking
     thought_words=("<|channel>thought\n", "<channel|>"),
     replace_eos=True,
     mm_plugin=get_mm_plugin(
@@ -2135,23 +2161,6 @@ register_template(
 )
 
 
-# copied from qwen3_5_nothink template
-register_template(
-    name="qwen3_6_nothink",
-    format_user=StringFormatter(slots=["<|im_start|>user\n{{content}}<|im_end|>\n<|im_start|>assistant\n"]),
-    format_assistant=StringFormatter(slots=["{{content}}<|im_end|>\n"]),
-    format_system=StringFormatter(slots=["<|im_start|>system\n{{content}}<|im_end|>\n"]),
-    format_function=FunctionFormatter(slots=["{{content}}<|im_end|>\n"], tool_format="qwen3_5"),
-    format_observation=StringFormatter(
-        slots=["<|im_start|>user\n<tool_response>\n{{content}}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"]
-    ),
-    format_tools=ToolFormatter(tool_format="qwen3_5"),
-    stop_words=["<|im_end|>"],
-    replace_eos=True,
-    mm_plugin=get_mm_plugin(name="qwen3_vl", image_token="<|image_pad|>", video_token="<|video_pad|>"),
-)
-
-
 register_template(
     name="sailor",
     format_user=StringFormatter(slots=["<|im_start|>question\n{{content}}<|im_end|>\n<|im_start|>answer\n"]),
@@ -2362,4 +2371,3 @@ register_template(
     efficient_eos=True,
     template_class=Glm47ReasoningTemplate,
 )
-
