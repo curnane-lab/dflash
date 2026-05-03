@@ -27,7 +27,7 @@ dflash_attention_backend: sdpa
 dflash_pretrained_model_path: /home/f00538480/Qwen3.5-4B-DFlash/
 
 ### dataset
-dataset: open_perfectblend_distilled_60k
+dataset: open_perfectblend
 template: qwen3_5_nothink
 cutoff_len: 3072
 overwrite_cache: true
