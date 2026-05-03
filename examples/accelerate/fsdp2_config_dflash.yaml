@@ -1,8 +1,10 @@
-# FSDP2 configuration for Qwen3.5 full fine-tuning on Ascend NPU
+# FSDP2 configuration for DFlash draft model training on Ascend NPU
 # Usage:
 #   accelerate launch \
-#       --config_file examples/accelerate/fsdp2_config_qwen35.yaml \
-#       src/train.py examples/ascend/qwen3_5_full_sft_fsdp2.yaml
+#       --config_file examples/accelerate/fsdp2_config_dflash.yaml \
+#       src/train.py examples/train_dflash/qwen3_5_dflash_sft_npu.yaml
+#
+# Note: Change `num_processes` below to match your NPU count (e.g., 8 for A2, 16 for A3)
 
 compute_environment: LOCAL_MACHINE
 debug: false
@@ -11,7 +13,7 @@ downcast_bf16: 'no'
 fsdp_config:
   fsdp_version: 2
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3_5DecoderLayer,Qwen3_5VisionBlock
+  fsdp_transformer_layer_cls_to_wrap: Qwen3DFlashDecoderLayer
   fsdp_cpu_ram_efficient_loading: true
   fsdp_offload_params: false
   fsdp_reshard_after_forward: true
@@ -20,7 +22,7 @@ machine_rank: 0
 main_training_function: main
 mixed_precision: bf16
 num_machines: 1
-num_processes: 8  # Change to match your NPU count (e.g., 8 for A2, 16 for A3)
+num_processes: 8
 rdzv_backend: static
 same_network: true
 tpu_env: []
