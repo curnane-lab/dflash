@@ -1,10 +1,11 @@
 from typing import TYPE_CHECKING, Optional
 
 import torch
-from transformers import Trainer
+from transformers import DataCollatorForSeq2Seq, Trainer
 from typing_extensions import override
 
 from ...extras import logging
+from ...extras.constants import IGNORE_INDEX
 from ...model.dflash import DFlashDraftModel, HFDFlashTargetModel, OnlineDFlashModel, TargetEmbeddingsAndHead, build_target_layer_ids
 
 
@@ -16,6 +17,32 @@ if TYPE_CHECKING:
 
 
 logger = logging.get_logger(__name__)
+
+
+class DFlashDataCollator(DataCollatorForSeq2Seq):
+
+    def __call__(self, features, return_tensors=None):
+        loss_masks = None
+        if features and "loss_mask" in features[0]:
+            loss_masks = [f.pop("loss_mask") for f in features]
+
+        batch = super().__call__(features, return_tensors=return_tensors)
+
+        if loss_masks is not None:
+            padded_loss_masks = []
+            max_len = batch["input_ids"].shape[-1]
+            for lm in loss_masks:
+                if isinstance(lm, list):
+                    lm = torch.tensor(lm, dtype=torch.float32)
+                pad_len = max_len - lm.shape[0]
+                if pad_len > 0:
+                    lm = torch.cat([lm, torch.zeros(pad_len, dtype=torch.float32)])
+                else:
+                    lm = lm[:max_len]
+                padded_loss_masks.append(lm)
+            batch["loss_mask"] = torch.stack(padded_loss_masks)
+
+        return batch
 
 
 class DFlashTrainer(Trainer):
@@ -46,7 +73,7 @@ class DFlashTrainer(Trainer):
         if loss_mask is None:
             labels = inputs.get("labels", None)
             if labels is not None:
-                loss_mask = (labels != -100).float()
+                loss_mask = (labels != IGNORE_INDEX).float()
             else:
                 loss_mask = attention_mask.float() if attention_mask is not None else torch.ones_like(input_ids, dtype=torch.float32)
 
@@ -62,11 +89,6 @@ class DFlashTrainer(Trainer):
             hidden_states=target_output.hidden_states,
             loss_mask=target_output.loss_mask,
         )
-
-        if self.state.is_world_process_zero and hasattr(self, "_logged_acc_once"):
-            pass
-        elif self.state.is_world_process_zero:
-            self._logged_acc_once = True
 
         if self.control.should_log and self.state.is_world_process_zero:
             logs = {"dflash_accuracy": accuracy.item()}

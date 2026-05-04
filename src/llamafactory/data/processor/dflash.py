@@ -26,7 +26,7 @@ class DFlashDatasetProcessor(DatasetProcessor):
         images: list["ImageInput"],
         videos: list["VideoInput"],
         audios: list["AudioInput"],
-    ) -> tuple[list[int], list[int]]:
+    ) -> tuple[list[int], list[int], list[int]]:
         messages = self.template.mm_plugin.process_messages(prompt + response, images, videos, audios, self.processor)
         input_ids, labels = self.template.mm_plugin.process_token_ids(
             [], [], images, videos, audios, self.tokenizer, self.processor
@@ -34,6 +34,7 @@ class DFlashDatasetProcessor(DatasetProcessor):
         encoded_pairs = self.template.encode_multiturn(self.tokenizer, messages, system, tools)
         total_length = len(input_ids) + (1 if self.template.efficient_eos else 0)
 
+        loss_mask = []
         for turn_idx, (source_ids, target_ids) in enumerate(encoded_pairs):
             if total_length >= self.data_args.cutoff_len:
                 break
@@ -50,12 +51,14 @@ class DFlashDatasetProcessor(DatasetProcessor):
 
             input_ids += source_ids + target_ids
             labels += source_label + target_label
+            loss_mask += [0] * source_len + [1] * target_len
 
         if self.template.efficient_eos:
             input_ids += [self.tokenizer.eos_token_id]
             labels += [self.tokenizer.eos_token_id]
+            loss_mask += [1]
 
-        return input_ids, labels
+        return input_ids, labels, loss_mask
 
     def preprocess_dataset(self, examples: dict[str, list[Any]]) -> dict[str, list[Any]]:
         model_inputs = defaultdict(list)
@@ -66,7 +69,7 @@ class DFlashDatasetProcessor(DatasetProcessor):
                 )
                 continue
 
-            input_ids, labels = self._encode_data_example(
+            input_ids, labels, loss_mask = self._encode_data_example(
                 prompt=examples["_prompt"][i],
                 response=examples["_response"][i],
                 system=examples["_system"][i],
@@ -79,6 +82,7 @@ class DFlashDatasetProcessor(DatasetProcessor):
             model_inputs["input_ids"].append(input_ids)
             model_inputs["attention_mask"].append([1] * len(input_ids))
             model_inputs["labels"].append(labels)
+            model_inputs["loss_mask"].append(loss_mask)
 
         return model_inputs
 

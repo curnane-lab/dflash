@@ -1,7 +1,6 @@
 from typing import TYPE_CHECKING, Optional
 
 import torch
-from transformers import DataCollatorForSeq2Seq
 
 from ...data import get_dataset, get_template_and_fix_tokenizer
 from ...extras import logging
@@ -14,7 +13,7 @@ from ...model.dflash import (
     TargetEmbeddingsAndHead,
     build_target_layer_ids,
 )
-from .trainer import DFlashTrainer
+from .trainer import DFlashDataCollator, DFlashTrainer
 
 
 if TYPE_CHECKING:
@@ -158,24 +157,16 @@ def run_dflash(
     }
     source_config.layer_types = ["full_attention"] * num_draft_layers
 
-    # Official dflash implementation uses full-dimension RoPE (partial_rotary_factor=1.0).
-    # The simplified apply_rotary_pos_emb does not support partial rotation.
     source_config.partial_rotary_factor = 1.0
-
-    if hasattr(source_config, "rope_theta"):
-        source_config.rope_theta = source_config.rope_theta
 
     if finetuning_args.dflash_pretrained_model_path is not None:
         logger.info_rank0(f"Loading pretrained DFlash draft model from {finetuning_args.dflash_pretrained_model_path}")
-        # Load pretrained config to ensure architecture compatibility with checkpoint weights.
         pretrained_config = AutoConfig.from_pretrained(
             finetuning_args.dflash_pretrained_model_path,
             trust_remote_code=model_args.trust_remote_code,
         )
         pretrained_text_config = getattr(pretrained_config, "text_config", None)
         draft_config = pretrained_text_config if pretrained_text_config is not None else pretrained_config
-        # Override training-specific attributes while preserving architecture dimensions
-        # (hidden_size, intermediate_size, head_dim, num_attention_heads, etc.)
         draft_config.num_hidden_layers = num_draft_layers
         draft_config.block_size = finetuning_args.dflash_block_size
         draft_config.num_target_layers = num_target_layers
@@ -184,18 +175,25 @@ def run_dflash(
             "target_layer_ids": target_layer_ids,
         }
         draft_config.layer_types = ["full_attention"] * num_draft_layers
-        # Safety check: hidden_size must match target model for DFlash training
+        draft_config.partial_rotary_factor = 1.0
         if draft_config.hidden_size != source_config.hidden_size:
             raise ValueError(
                 f"Pretrained draft model hidden_size ({draft_config.hidden_size}) does not match "
                 f"target model hidden_size ({source_config.hidden_size}). DFlash requires the same hidden_size."
+            )
+        if getattr(draft_config, "rope_theta", None) != getattr(source_config, "rope_theta", None):
+            logger.warning_rank0(
+                f"Draft model rope_theta ({getattr(draft_config, 'rope_theta', 'N/A')}) != "
+                f"Target model rope_theta ({getattr(source_config, 'rope_theta', 'N/A')}). "
+                f"Using draft model's rope_theta to match pretrained weights."
             )
         logger.info_rank0(
             f"Using pretrained draft config: hidden_size={draft_config.hidden_size}, "
             f"intermediate_size={getattr(draft_config, 'intermediate_size', 'N/A')}, "
             f"head_dim={getattr(draft_config, 'head_dim', 'N/A')}, "
             f"num_attention_heads={draft_config.num_attention_heads}, "
-            f"rope_theta={getattr(draft_config, 'rope_theta', 'N/A')}"
+            f"rope_theta={getattr(draft_config, 'rope_theta', 'N/A')}, "
+            f"partial_rotary_factor={getattr(draft_config, 'partial_rotary_factor', 'N/A')}"
         )
 
         draft_model = DFlashDraftModel.from_pretrained(
@@ -205,15 +203,13 @@ def run_dflash(
             ignore_mismatched_sizes=True,
         )
 
-        # Check target_layer_ids compatibility: if the pretrained checkpoint was trained
-        # with a different set of target layers, the fc layer weights are meaningless.
         pretrained_target_layer_ids = pretrained_config.dflash_config.get("target_layer_ids", [])
         if pretrained_target_layer_ids and pretrained_target_layer_ids != target_layer_ids:
             logger.warning_rank0(
                 f"Pretrained target_layer_ids {pretrained_target_layer_ids} do not match "
                 f"current target_layer_ids {target_layer_ids}. Re-initializing fc layer."
             )
-            nn.init.normal_(draft_model.fc.weight, mean=0.0, std=config.initializer_range)
+            nn.init.normal_(draft_model.fc.weight, mean=0.0, std=draft_config.initializer_range)
 
         draft_model = draft_model.to(device=device, dtype=dtype)
     else:
@@ -243,7 +239,7 @@ def run_dflash(
         loss_decay_gamma=finetuning_args.dflash_loss_decay_gamma,
     )
 
-    data_collator = DataCollatorForSeq2Seq(
+    data_collator = DFlashDataCollator(
         tokenizer=tokenizer,
         model=None,
         padding=True,
