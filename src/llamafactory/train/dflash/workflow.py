@@ -71,6 +71,8 @@ def run_dflash(
     text_config = getattr(target_config, "text_config", None)
     source_config = text_config if text_config is not None else target_config
 
+    num_target_layers = getattr(source_config, "num_hidden_layers", getattr(target_config, "num_hidden_layers", 32))
+
     logger.info_rank0("Extracting target model embeddings and lm_head...")
     target_components = TargetEmbeddingsAndHead(source_config)
     # Copy weights from the already-loaded HF target model instead of re-parsing checkpoint files.
@@ -123,8 +125,45 @@ def run_dflash(
 
     logger.info_rank0("Creating DFlash draft model...")
 
-    num_target_layers = getattr(target_config, "num_hidden_layers", 32)
     num_draft_layers = finetuning_args.dflash_num_draft_layers
+
+    target_model_type = getattr(target_config, "model_type", "")
+    target_architectures = getattr(target_config, "architectures", [])
+    has_hybrid_attention = hasattr(source_config, "layer_types") and source_config.layer_types is not None and any(
+        lt not in ("full_attention", "sliding_attention", None) for lt in source_config.layer_types
+    )
+    if has_hybrid_attention:
+        logger.warning_rank0(
+            f"Target model uses hybrid attention architecture (layer_types={source_config.layer_types}). "
+            f"DFlash draft model uses standard Qwen3 full attention. "
+            f"The draft model's attention pattern differs from the target model, "
+            f"which may affect training quality. Consider using a Qwen3-based target model "
+            f"or adapting the draft model architecture to match."
+        )
+
+    if finetuning_args.dflash_pretrained_model_path is not None:
+        pretrained_config = AutoConfig.from_pretrained(
+            finetuning_args.dflash_pretrained_model_path,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+        pretrained_hidden_size = getattr(pretrained_config, "hidden_size", None)
+        pretrained_intermediate_size = getattr(pretrained_config, "intermediate_size", None)
+        pretrained_num_attention_heads = getattr(pretrained_config, "num_attention_heads", None)
+        target_hidden_size = getattr(source_config, "hidden_size", None)
+        target_intermediate_size = getattr(source_config, "intermediate_size", None)
+        target_num_attention_heads = getattr(source_config, "num_attention_heads", None)
+        if pretrained_hidden_size != target_hidden_size:
+            raise ValueError(
+                f"Pretrained DFlash hidden_size ({pretrained_hidden_size}) != "
+                f"Target model hidden_size ({target_hidden_size}). DFlash requires matching hidden_size."
+            )
+        if pretrained_intermediate_size != target_intermediate_size:
+            logger.warning_rank0(
+                f"Pretrained DFlash intermediate_size ({pretrained_intermediate_size}) != "
+                f"Target model intermediate_size ({target_intermediate_size}). "
+                f"This is expected for Qwen3.5 hybrid architecture (DeltaNet layers use different FFN sizes). "
+                f"The draft model will use intermediate_size={pretrained_intermediate_size}."
+            )
 
     if finetuning_args.dflash_target_layer_ids is not None:
         target_layer_ids = finetuning_args.dflash_target_layer_ids
